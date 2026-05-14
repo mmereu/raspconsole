@@ -1,0 +1,4 @@
+# Set FTDI latency_timer to 1ms (default 16ms causes chunky output at 9600 baud)
+SUBSYSTEM=="usb-serial", DRIVER=="ftdi_sio", ATTR{latency_timer}="1"
+SUBSYSTEM=="usb-serial", DRIVER=="ch341", ATTR{latency_timer}="1"
+SUBSYSTEM=="usb-serial", DRIVER=="cp210x", ATTR{latency_timer}="1"

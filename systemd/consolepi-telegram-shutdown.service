@@ -1,0 +1,12 @@
+[Unit]
+Description=Telegram notification on shutdown
+DefaultDependencies=no
+Before=shutdown.target reboot.target halt.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/telegram-notify.sh shutdown
+
+[Install]
+WantedBy=halt.target reboot.target shutdown.target

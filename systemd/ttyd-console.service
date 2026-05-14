@@ -1,0 +1,15 @@
+[Unit]
+Description=ttyd Serial Console (Web Terminal)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Environment=COLUMNS=200
+Environment=LINES=50
+ExecStart=/usr/local/bin/ttyd -p 8080 -W -t titleFixed=RasP-Console -t fontSize=13 -t backspaceSendsDelete=false /usr/local/bin/console-connect.sh
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

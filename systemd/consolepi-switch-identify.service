@@ -1,0 +1,7 @@
+[Unit]
+Description=Switch Identification via Serial Console
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/switch-identify.sh

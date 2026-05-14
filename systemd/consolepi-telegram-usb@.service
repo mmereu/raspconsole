@@ -1,0 +1,7 @@
+[Unit]
+Description=Telegram notify USB connect %i
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/telegram-notify.sh usb-connect /dev/%i

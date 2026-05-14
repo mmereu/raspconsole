@@ -1,0 +1,5 @@
+ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyUSB*", TAG+="systemd", ENV{SYSTEMD_WANTS}="consolepi-telegram-usb@%k.service"
+ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyACM*", TAG+="systemd", ENV{SYSTEMD_WANTS}="consolepi-telegram-usb@%k.service"
+ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyUSB*", RUN+="/bin/systemctl --no-block start consolepi-switch-identify.service"
+ACTION=="remove", SUBSYSTEM=="tty", KERNEL=="ttyUSB*", RUN+="/bin/systemctl --no-block start consolepi-telegram-usb-remove@%k.service"
+ACTION=="remove", SUBSYSTEM=="tty", KERNEL=="ttyACM*", RUN+="/bin/systemctl --no-block start consolepi-telegram-usb-remove@%k.service"

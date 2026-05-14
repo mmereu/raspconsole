@@ -1,0 +1,6 @@
+[Unit]
+Description=Telegram notify USB disconnect %i
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/telegram-notify.sh usb-disconnect /dev/%i
