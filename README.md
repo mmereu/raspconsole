@@ -1,5 +1,7 @@
 # RasP-Console
 
+**[English]** | [Italiano](#italiano)
+
 A Raspberry Pi-based serial console server for network switches, featuring a web terminal, Telegram notifications, and automated monitoring.
 
 Designed for multi-site deployments by field technicians — each unit boots, reports its IP via Telegram, and provides instant browser-based access to the switch console port.
@@ -144,3 +146,118 @@ All units report to the same Telegram group automatically.
 ## License
 
 MIT
+
+---
+
+## Italiano
+
+Console seriale su Raspberry Pi per switch di rete, con terminale web, notifiche Telegram e monitoraggio automatico.
+
+Progettato per deployment multi-sito da tecnici installatori — ogni unità si avvia, comunica il proprio IP via Telegram e fornisce accesso immediato alla porta console dello switch tramite browser.
+
+## Funzionalità
+
+- **Terminale web** su `http://<ip>:8080` — console seriale via browser con [ttyd](https://github.com/tsl0922/ttyd)
+- **Ctrl+C / Ctrl+V** — supporto appunti tramite nginx reverse proxy con injection JavaScript
+- **Fix Backspace** per switch Huawei VRP (conversione DEL → BS)
+- **Rendering corretto** — fix ONLCR per visualizzazione corretta delle righe nel terminale web
+- **Notifiche Telegram** — avvio, spegnimento, connessione/disconnessione USB, hostname switch
+- **Identificazione automatica switch** — legge l'hostname dello switch alla connessione USB e lo invia su Telegram
+- **Hardware watchdog** — riavvio automatico in caso di blocco del sistema
+- **Fix latenza FTDI** — latency timer a 1ms (vs 16ms default) per output seriale pulito a 9600 baud
+- **Log sessioni** — sessioni seriali salvate in `/var/log/ConsolePi/serial/`
+- **Rotazione log** — pulizia automatica dei log più vecchi di 30 giorni
+
+## Architettura
+
+```
+Browser → nginx :8080 (fix Ctrl+V) → ttyd :8081 → serial-console.py → /dev/ttyUSB0 → Switch
+```
+
+| Porta | Servizio | Descrizione |
+|-------|----------|-------------|
+| 8080  | nginx    | Reverse proxy con injection JS per appunti |
+| 8081  | ttyd     | Terminale web (xterm.js) |
+| 8888  | Dashboard | Pagina di stato stile OceanX |
+| 5000  | ConsolePi API | REST API |
+
+## Hardware
+
+- Raspberry Pi (qualsiasi modello con USB)
+- Adattatore USB-seriale FTDI FT232R
+- Cavo console (rollover RJ45 per Huawei)
+- Testato con switch serie **Huawei CloudEngine** (9600 baud)
+
+## Avvio rapido
+
+### 1. Clona e configura
+
+```bash
+git clone https://github.com/mmereu/raspconsole.git
+cd raspconsole
+```
+
+### 2. Configura Telegram (opzionale)
+
+Modifica `scripts/telegram-notify.sh` e `scripts/switch-identify.sh`:
+
+```bash
+TELEGRAM_TOKEN="YOUR_TELEGRAM_BOT_TOKEN"
+TELEGRAM_CHAT_ID="YOUR_TELEGRAM_GROUP_CHAT_ID"
+```
+
+### 3. Installa le dipendenze
+
+```bash
+sudo apt-get install -y nginx python3 picocom
+# Installa ttyd v1.7.7 da https://github.com/tsl0922/ttyd/releases
+```
+
+### 4. Deploy dei file
+
+```bash
+# Script
+sudo cp scripts/*.py scripts/*.sh /usr/local/bin/
+sudo chmod +x /usr/local/bin/*.py /usr/local/bin/*.sh
+
+# Servizi systemd
+sudo cp systemd/*.service systemd/*.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now ttyd-console.service raspconsole-watchdog.timer
+
+# nginx
+sudo mkdir -p /etc/nginx/static
+sudo cp nginx/static/paste-fix.js /etc/nginx/static/
+sudo cp nginx/ttyd.conf /etc/nginx/sites-available/ttyd
+sudo ln -sf /etc/nginx/sites-available/ttyd /etc/nginx/sites-enabled/ttyd
+sudo rm -f /etc/nginx/sites-enabled/default
+sudo systemctl enable --now nginx
+
+# Regole udev
+sudo cp udev/*.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules
+```
+
+### 5. Imposta l'hostname (uno per unità)
+
+```bash
+sudo hostnamectl set-hostname RasP-Console-NomeTecnico
+```
+
+## Note tecniche
+
+- `tty.setraw()` disabilita `ONLCR` sul PTY slave — `serial-console.py` converte manualmente `\n→\r\n` sull'output seriale
+- `navigator.clipboard` richiede HTTPS in Chrome — il supporto appunti usa invece gli eventi paste nativi del browser
+- La latenza FTDI default di 16ms causa output frammentato a 9600 baud — la regola udev la imposta a 1ms in modo persistente
+- `BindsTo=` sulle device unit causa stop permanenti alla disconnessione — usare `Restart=always`
+- ser2net va in conflitto con picocom sulla stessa porta — disabilitato in favore di picocom diretto
+
+## Multi-Deploy
+
+Clona la SD card da un'unità configurata. Cambia solo l'hostname per distinguere le unità:
+
+```bash
+sudo hostnamectl set-hostname RasP-Console-<NomeTecnico>
+```
+
+Tutte le unità inviano notifiche allo stesso gruppo Telegram automaticamente.
