@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Minimal serial console with proper backspace handling for Huawei switches.
-Converts DEL (0x7F) to BS (0x08) before sending to serial port."""
+Converts DEL (0x7F) to BS (0x08) before sending to serial port.
+Converts newlines on output (tty.setraw disables ONLCR on the PTY slave)."""
 
 import sys
 import os
@@ -65,6 +66,8 @@ def main():
                 try:
                     data = os.read(fd, 4096)
                     if data:
+                        # Fix ONLCR: tty.setraw disabilita conversione \n->\r\n sul PTY slave
+                        data = data.replace(b'\r\n', b'\n').replace(b'\n', b'\r\n')
                         os.write(sys.stdout.fileno(), data)
                         sys.stdout.flush()
                 except OSError:
