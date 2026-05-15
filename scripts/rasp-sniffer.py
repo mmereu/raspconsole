@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""RasP-Sniffer — Web UI per packet capture con tshark su Raspberry Pi.
-Porta 9090. Avvia/ferma catture, filtra con BPF, scarica il .pcap."""
+"""RasP-Sniffer — Wireshark-style live packet capture web interface.
+Porta 9090. Streaming SSE in tempo reale, righe colorate per protocollo."""
 
 import json
 import os
+import queue
 import signal
 import subprocess
 import threading
@@ -13,6 +14,7 @@ from flask import Flask, Response, jsonify, request, render_template_string, sen
 CAPTURE_DIR = "/var/log/rasp-sniffer"
 PCAP_FILE = os.path.join(CAPTURE_DIR, "capture.pcap")
 PORT = 9090
+MAX_PKT = 10000
 
 os.makedirs(CAPTURE_DIR, exist_ok=True)
 app = Flask(__name__)
@@ -21,6 +23,8 @@ _proc = None
 _start_time = None
 _iface = None
 _bpf = ""
+_packets = []
+_sse_queues = []
 
 
 def get_interfaces():
@@ -42,119 +46,201 @@ def is_alive():
     return _proc is not None and _proc.poll() is None
 
 
+def parse_line(line):
+    """Parse | separated tshark -T fields output."""
+    parts = line.split("|", 6)
+    if len(parts) < 7:
+        return None
+    try:
+        return {
+            "no":    int(parts[0]) if parts[0].strip().isdigit() else 0,
+            "time":  parts[1].strip(),
+            "src":   parts[2].strip(),
+            "dst":   parts[3].strip(),
+            "proto": parts[4].strip(),
+            "len":   parts[5].strip(),
+            "info":  parts[6].strip(),
+        }
+    except (ValueError, IndexError):
+        return None
+
+
+def broadcast(data):
+    with _lock:
+        dead = []
+        for q in _sse_queues:
+            try:
+                q.put_nowait(data)
+            except queue.Full:
+                dead.append(q)
+        for q in dead:
+            _sse_queues.remove(q)
+
+
+def reader_thread(proc):
+    global _packets
+    for raw in proc.stdout:
+        line = raw.rstrip("\n")
+        if not line.strip():
+            continue
+        pkt = parse_line(line)
+        if not pkt:
+            continue
+        pkt_json = json.dumps(pkt)
+        with _lock:
+            _packets.append(pkt)
+            if len(_packets) > MAX_PKT:
+                _packets.pop(0)
+        broadcast(pkt_json)
+
+
 HTML = r"""<!DOCTYPE html>
 <html lang="it">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>RasP-Sniffer</title>
-  <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0d1117; color: #c9d1d9; min-height: 100vh; }
-    .wrap { max-width: 720px; margin: 0 auto; padding: 32px 16px; }
-    header { border-bottom: 1px solid #21262d; padding-bottom: 20px; margin-bottom: 24px; }
-    header h1 { font-size: 24px; color: #58a6ff; }
-    header p { font-size: 13px; color: #8b949e; margin-top: 4px; }
-    .card { background: #161b22; border: 1px solid #21262d; border-radius: 8px; padding: 20px; margin-bottom: 16px; }
-    .card h2 { font-size: 12px; color: #58a6ff; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 16px; }
-    .row { margin-bottom: 14px; }
-    label { display: block; font-size: 12px; color: #8b949e; margin-bottom: 6px; }
-    select, input[type=text] {
-      width: 100%; padding: 8px 12px; background: #0d1117; color: #c9d1d9;
-      border: 1px solid #30363d; border-radius: 6px; font-size: 14px; outline: none;
-    }
-    select:focus, input:focus { border-color: #58a6ff; }
-    .btn-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 16px; }
-    button {
-      padding: 8px 18px; border: none; border-radius: 6px; font-size: 14px;
-      font-weight: 600; cursor: pointer; transition: opacity .15s;
-    }
-    button:hover:not(:disabled) { opacity: .85; }
-    button:disabled { opacity: .35; cursor: not-allowed; }
-    #btn-start { background: #238636; color: #fff; }
-    #btn-stop  { background: #da3633; color: #fff; }
-    #btn-dl    { background: #1f6feb; color: #fff; }
-    .stats {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-      gap: 12px;
-    }
-    .stat { background: #0d1117; border: 1px solid #21262d; border-radius: 6px; padding: 12px; }
-    .stat-label { font-size: 11px; color: #8b949e; text-transform: uppercase; letter-spacing: .8px; margin-bottom: 6px; }
-    .stat-value { font-size: 20px; font-weight: 700; color: #c9d1d9; }
-    .badge { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 20px; font-size: 12px; font-weight: 600; }
-    .badge-off { background: #21262d; color: #8b949e; }
-    .badge-on  { background: #1a4520; color: #3fb950; }
-    .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
-    .badge-on .dot { animation: blink 1s infinite; }
-    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
-    #log-box {
-      background: #0d1117; border: 1px solid #21262d; border-radius: 6px;
-      padding: 10px 14px; font-family: 'Courier New', monospace; font-size: 12px;
-      color: #8b949e; min-height: 36px;
-    }
-  </style>
+<meta charset="UTF-8">
+<title>RasP-Sniffer</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Courier New',monospace;background:#1e1e2e;color:#cdd6f4;display:flex;flex-direction:column;height:100vh;overflow:hidden}
+#toolbar{background:#181825;padding:7px 10px;display:flex;align-items:center;gap:6px;border-bottom:2px solid #313244;flex-shrink:0;flex-wrap:wrap}
+#toolbar h1{font-size:14px;color:#89b4fa;margin-right:4px;font-family:sans-serif}
+#filter-bar{background:#11111b;padding:5px 10px;display:flex;align-items:center;gap:6px;border-bottom:1px solid #313244;flex-shrink:0}
+#filter-bar label{font-size:11px;color:#6c7086}
+#bpf{background:#313244;color:#cdd6f4;border:1px solid #45475a;border-radius:3px;padding:3px 8px;font-size:12px;font-family:monospace;width:340px}
+#bpf.invalid{border-color:#f38ba8}
+select{background:#313244;color:#cdd6f4;border:1px solid #45475a;border-radius:3px;padding:3px 8px;font-size:12px}
+button{padding:4px 12px;border:none;border-radius:3px;font-size:12px;font-weight:700;cursor:pointer;font-family:sans-serif}
+button:hover:not(:disabled){filter:brightness(1.15)}
+button:disabled{opacity:.35;cursor:not-allowed}
+#btn-start{background:#a6e3a1;color:#1e1e2e}
+#btn-stop{background:#f38ba8;color:#1e1e2e}
+#btn-clear{background:#45475a;color:#cdd6f4}
+#btn-dl{background:#89b4fa;color:#1e1e2e}
+.sep{color:#45475a;font-size:16px}
+#stats{margin-left:auto;font-size:11px;color:#6c7086;font-family:sans-serif;white-space:nowrap}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#f38ba8;margin-right:5px;vertical-align:middle}
+.dot.on{background:#a6e3a1;animation:blink .9s infinite}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.25}}
+#wrap{flex:1;overflow:auto}
+table{width:100%;border-collapse:collapse;font-size:11.5px}
+thead th{background:#181825;color:#89b4fa;padding:4px 8px;text-align:left;border-right:1px solid #1e1e2e;border-bottom:2px solid #313244;position:sticky;top:0;z-index:10;font-family:sans-serif;font-size:11px;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap;cursor:pointer;user-select:none}
+thead th:hover{background:#313244}
+td{padding:2px 8px;border-bottom:1px solid #11111b;white-space:nowrap;overflow:hidden;max-width:320px;text-overflow:ellipsis}
+.no{width:52px;color:#6c7086}
+.time{width:110px;color:#a6adc8}
+.src{width:160px}
+.dst{width:160px}
+.proto{width:68px;font-weight:700}
+.len{width:46px;text-align:right;color:#a6adc8}
+.info{color:#cdd6f4}
+/* Protocol row colors — Wireshark-inspired dark */
+tr.TCP    {background:#182036}
+tr.UDP    {background:#182a1e}
+tr.DNS    {background:#2a2a10}
+tr.HTTP   {background:#122a12}
+tr.HTTPS,tr.TLS,tr.SSL{background:#12122a}
+tr.ARP    {background:#22102a}
+tr.ICMP   {background:#2a1212}
+tr.DHCP   {background:#2a1e10}
+tr.STP    {background:#102222}
+tr.LLDP   {background:#101e2a}
+tr.OTHER  {background:#1e1e2e}
+tbody tr:hover{filter:brightness(1.6);cursor:default}
+tbody tr.sel{outline:1px solid #89b4fa;filter:brightness(1.8)}
+#autoscroll{accent-color:#89b4fa}
+</style>
 </head>
 <body>
-<div class="wrap">
-  <header>
-    <h1>&#x1F4E1; RasP-Sniffer</h1>
-    <p>Packet capture web interface &mdash; powered by tshark</p>
-  </header>
-
-  <div class="card">
-    <h2>Configurazione</h2>
-    <div class="row">
-      <label for="iface">Interfaccia di rete</label>
-      <select id="iface"></select>
-    </div>
-    <div class="row">
-      <label for="bpf">Filtro BPF <span style="color:#484f58">(opzionale &mdash; es: tcp port 443, icmp, host 10.0.0.1)</span></label>
-      <input type="text" id="bpf" placeholder="tcp port 80">
-    </div>
-    <div class="btn-row">
-      <button id="btn-start" onclick="startCapture()">&#9654; Avvia cattura</button>
-      <button id="btn-stop"  onclick="stopCapture()" disabled>&#9632; Ferma</button>
-      <button id="btn-dl"    onclick="location.href='/download'" disabled>&#11015; Scarica .pcap</button>
-    </div>
+<div id="toolbar">
+  <h1>&#x1F4E1; RasP-Sniffer</h1>
+  <span class="sep">|</span>
+  <label style="font-size:11px;color:#6c7086;font-family:sans-serif">Interfaccia</label>
+  <select id="iface"></select>
+  <button id="btn-start" onclick="startCapture()">&#9654; Avvia</button>
+  <button id="btn-stop"  onclick="stopCapture()" disabled>&#9632; Ferma</button>
+  <span class="sep">|</span>
+  <button id="btn-clear" onclick="clearTable()">&#10006; Pulisci</button>
+  <button id="btn-dl" onclick="location.href='/download'" disabled>&#11015; Scarica .pcap</button>
+  <div id="stats">
+    <span class="dot" id="dot"></span>
+    <span id="stat-pkt">0 pacchetti</span>
+    &nbsp;|&nbsp;
+    <span id="stat-size">—</span>
+    &nbsp;|&nbsp;
+    <span id="stat-dur">—</span>
   </div>
-
-  <div class="card">
-    <h2>Stato</h2>
-    <div class="stats">
-      <div class="stat">
-        <div class="stat-label">Stato</div>
-        <div class="stat-value" id="s-status">
-          <span class="badge badge-off"><span class="dot"></span>Fermo</span>
-        </div>
-      </div>
-      <div class="stat">
-        <div class="stat-label">Interfaccia</div>
-        <div class="stat-value" id="s-iface">&#8212;</div>
-      </div>
-      <div class="stat">
-        <div class="stat-label">Durata</div>
-        <div class="stat-value" id="s-dur">&#8212;</div>
-      </div>
-      <div class="stat">
-        <div class="stat-label">File .pcap</div>
-        <div class="stat-value" id="s-size">&#8212;</div>
-      </div>
-    </div>
-  </div>
-
-  <div class="card">
-    <h2>Log</h2>
-    <div id="log-box">Pronto.</div>
-  </div>
+</div>
+<div id="filter-bar">
+  <label for="bpf">Filtro BPF:</label>
+  <input type="text" id="bpf" placeholder="tcp port 80 &#160;|&#160; icmp &#160;|&#160; host 10.0.0.1 &#160;|&#160; not arp">
+  <label style="font-size:11px;color:#6c7086;margin-left:10px">
+    <input type="checkbox" id="autoscroll" checked> Auto-scroll
+  </label>
+</div>
+<div id="wrap">
+  <table id="pkt-table">
+    <thead>
+      <tr>
+        <th class="no">No.</th>
+        <th class="time">Tempo</th>
+        <th class="src">Origine</th>
+        <th class="dst">Destinazione</th>
+        <th class="proto">Protocollo</th>
+        <th class="len">Lung.</th>
+        <th class="info">Info</th>
+      </tr>
+    </thead>
+    <tbody id="tbody"></tbody>
+  </table>
 </div>
 
 <script>
-var $ = function(id) { return document.getElementById(id); };
+var pktCount = 0;
+var es = null;
+var autoscroll = true;
 
-function log(msg) {
-  var t = new Date().toLocaleTimeString('it-IT');
-  $('log-box').textContent = '[' + t + '] ' + msg;
+document.getElementById('autoscroll').addEventListener('change', function(e) {
+  autoscroll = e.target.checked;
+});
+
+function protoClass(p) {
+  var map = {
+    'TCP':'TCP','UDP':'UDP','DNS':'DNS','HTTP':'HTTP','HTTPS':'HTTPS',
+    'TLS':'TLS','SSL':'SSL','ARP':'ARP','ICMP':'ICMP','ICMPv6':'ICMP',
+    'DHCP':'DHCP','DHCPv6':'DHCP','STP':'STP','LLDP':'LLDP',
+    'IGMP':'OTHER','MDNS':'DNS','LLMNR':'DNS','NTP':'OTHER'
+  };
+  return map[p] || 'OTHER';
+}
+
+function addRow(pkt) {
+  pktCount++;
+  var tb = document.getElementById('tbody');
+  var tr = document.createElement('tr');
+  tr.className = protoClass(pkt.proto);
+  tr.innerHTML =
+    '<td class="no">'   + escHtml(String(pkt.no))    + '</td>' +
+    '<td class="time">' + escHtml(pkt.time)           + '</td>' +
+    '<td class="src">'  + escHtml(pkt.src)            + '</td>' +
+    '<td class="dst">'  + escHtml(pkt.dst)            + '</td>' +
+    '<td class="proto">'+ escHtml(pkt.proto)          + '</td>' +
+    '<td class="len">'  + escHtml(pkt.len)            + '</td>' +
+    '<td class="info">' + escHtml(pkt.info)           + '</td>';
+  tr.onclick = function() {
+    var prev = document.querySelector('tr.sel');
+    if (prev) prev.classList.remove('sel');
+    tr.classList.add('sel');
+  };
+  tb.appendChild(tr);
+  if (autoscroll) {
+    var wrap = document.getElementById('wrap');
+    wrap.scrollTop = wrap.scrollHeight;
+  }
+  document.getElementById('stat-pkt').textContent = pktCount + ' pacchetti';
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
 function fmtBytes(b) {
@@ -166,50 +252,70 @@ function fmtBytes(b) {
 
 function fmtDur(s) {
   if (!s) return '—';
-  var h = Math.floor(s/3600), m = Math.floor(s%3600/60), sec = s%60;
-  return (h ? h+'h ' : '') + (m ? m+'m ' : '') + sec + 's';
+  var h=Math.floor(s/3600),m=Math.floor(s%3600/60),sec=s%60;
+  return (h?h+'h ':'')+(m?m+'m ':'')+sec+'s';
 }
 
 function loadIfaces() {
-  fetch('/interfaces').then(function(r){ return r.json(); }).then(function(list) {
-    var sel = $('iface');
+  fetch('/interfaces').then(function(r){return r.json();}).then(function(list){
+    var sel = document.getElementById('iface');
     sel.innerHTML = '';
-    list.forEach(function(i) { sel.add(new Option(i, i)); });
-  }).catch(function(){});
+    list.forEach(function(i){ sel.add(new Option(i,i)); });
+  });
 }
 
 function updateStatus() {
-  fetch('/status').then(function(r){ return r.json(); }).then(function(s) {
+  fetch('/status').then(function(r){return r.json();}).then(function(s){
     var on = s.capturing;
-    $('s-status').innerHTML = on
-      ? '<span class="badge badge-on"><span class="dot"></span>In cattura</span>'
-      : '<span class="badge badge-off"><span class="dot"></span>Fermo</span>';
-    $('s-iface').textContent = s.iface || '—';
-    $('s-dur').textContent   = on ? fmtDur(s.duration) : '—';
-    $('s-size').textContent  = fmtBytes(s.file_size);
-    $('btn-start').disabled = on;
-    $('btn-stop').disabled  = !on;
-    $('btn-dl').disabled    = !s.file_exists;
-  }).catch(function(){});
+    var dot = document.getElementById('dot');
+    dot.className = 'dot' + (on ? ' on' : '');
+    document.getElementById('stat-size').textContent = fmtBytes(s.file_size);
+    document.getElementById('stat-dur').textContent  = on ? fmtDur(s.duration) : '—';
+    document.getElementById('btn-start').disabled = on;
+    document.getElementById('btn-stop').disabled  = !on;
+    document.getElementById('btn-dl').disabled    = !s.file_exists;
+  });
 }
 
 function startCapture() {
-  var iface = $('iface').value;
-  var bpf   = $('bpf').value.trim();
+  var iface = document.getElementById('iface').value;
+  var bpf   = document.getElementById('bpf').value.trim();
+  clearTable();
   fetch('/start', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
+    method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({iface: iface, filter: bpf})
-  }).then(function(r){ return r.json(); }).then(function(d) {
-    log(d.message); updateStatus();
-  }).catch(function(e) { log('Errore: ' + e); });
+  }).then(function(r){return r.json();}).then(function(d){
+    if (d.ok) {
+      connectSSE();
+      updateStatus();
+    } else {
+      alert(d.message);
+    }
+  });
 }
 
 function stopCapture() {
-  fetch('/stop', {method: 'POST'})
-    .then(function(r){ return r.json(); })
-    .then(function(d) { log(d.message); updateStatus(); })
-    .catch(function(e) { log('Errore: ' + e); });
+  fetch('/stop',{method:'POST'}).then(function(r){return r.json();}).then(function(){
+    if (es) { es.close(); es = null; }
+    updateStatus();
+  });
+}
+
+function clearTable() {
+  document.getElementById('tbody').innerHTML = '';
+  pktCount = 0;
+  document.getElementById('stat-pkt').textContent = '0 pacchetti';
+}
+
+function connectSSE() {
+  if (es) es.close();
+  es = new EventSource('/stream');
+  es.onmessage = function(e) {
+    try { addRow(JSON.parse(e.data)); } catch(err) {}
+  };
+  es.onerror = function() {
+    es.close(); es = null;
+  };
 }
 
 loadIfaces();
@@ -247,37 +353,85 @@ def status():
     })
 
 
+@app.route("/stream")
+def stream():
+    """SSE endpoint — invia un evento JSON per ogni pacchetto catturato."""
+    q = queue.Queue(maxsize=2000)
+    with _lock:
+        _sse_queues.append(q)
+
+    def generate():
+        try:
+            while True:
+                try:
+                    data = q.get(timeout=15)
+                    yield "data: {}\n\n".format(data)
+                except queue.Empty:
+                    yield ": keepalive\n\n"
+        except GeneratorExit:
+            pass
+        finally:
+            with _lock:
+                if q in _sse_queues:
+                    _sse_queues.remove(q)
+
+    return Response(generate(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
 @app.route("/start", methods=["POST"])
 def start():
-    global _proc, _start_time, _iface, _bpf
+    global _proc, _start_time, _iface, _bpf, _packets
     data = request.get_json(force=True) or {}
     iface = data.get("iface", "eth0")
     bpf   = data.get("filter", "").strip()
     with _lock:
         if is_alive():
-            return jsonify({"ok": False, "message": "Cattura gia' in corso"})
+            return jsonify({"ok": False, "message": "Cattura gia in corso"})
         try:
             os.remove(PCAP_FILE)
         except FileNotFoundError:
             pass
-        cmd = ["tshark", "-i", iface, "-w", PCAP_FILE]
-        if bpf:
-            cmd += ["-f", bpf]
-        try:
-            _proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        _packets = []
+
+    cmd = [
+        "tshark", "-i", iface, "-l", "-n",
+        "-w", PCAP_FILE,
+        "-T", "fields",
+        "-e", "frame.number",
+        "-e", "frame.time_relative",
+        "-e", "_ws.col.Source",
+        "-e", "_ws.col.Destination",
+        "-e", "_ws.col.Protocol",
+        "-e", "frame.len",
+        "-e", "_ws.col.Info",
+        "-E", "separator=|",
+        "-E", "header=n",
+        "-E", "quote=n",
+    ]
+    if bpf:
+        cmd += ["-f", bpf]
+
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, text=True,
+                                bufsize=1)
+        with _lock:
+            _proc = proc
             _start_time = time.time()
             _iface = iface
-            _bpf   = bpf
-            msg = "Cattura avviata su " + iface
-            if bpf:
-                msg += " | filtro: " + bpf
-            return jsonify({"ok": True, "message": msg})
-        except FileNotFoundError:
-            return jsonify({"ok": False, "message": "tshark non trovato — installa: sudo apt install tshark"})
-        except PermissionError:
-            return jsonify({"ok": False, "message": "Permesso negato — eseguire il servizio come root"})
-        except Exception as e:
-            return jsonify({"ok": False, "message": str(e)})
+            _bpf = bpf
+        threading.Thread(target=reader_thread, args=(proc,), daemon=True).start()
+        msg = "Cattura avviata su " + iface
+        if bpf:
+            msg += " | filtro: " + bpf
+        return jsonify({"ok": True, "message": msg})
+    except FileNotFoundError:
+        return jsonify({"ok": False, "message": "tshark non trovato"})
+    except PermissionError:
+        return jsonify({"ok": False, "message": "Permesso negato — eseguire come root"})
+    except Exception as e:
+        return jsonify({"ok": False, "message": str(e)})
 
 
 @app.route("/stop", methods=["POST"])
@@ -293,24 +447,20 @@ def stop():
             _proc.kill()
         _proc = None
         _start_time = None
-        size = 0
-        try:
-            size = os.path.getsize(PCAP_FILE)
-        except FileNotFoundError:
-            pass
-        return jsonify({"ok": True, "message": "Cattura fermata — {:,} byte salvati".format(size)})
+    size = 0
+    try:
+        size = os.path.getsize(PCAP_FILE)
+    except FileNotFoundError:
+        pass
+    return jsonify({"ok": True, "message": "Cattura fermata — {:,} byte".format(size)})
 
 
 @app.route("/download")
 def download():
     if not os.path.exists(PCAP_FILE):
         return Response("Nessun file disponibile", status=404)
-    return send_file(
-        PCAP_FILE,
-        as_attachment=True,
-        download_name="capture.pcap",
-        mimetype="application/vnd.tcpdump.pcap",
-    )
+    return send_file(PCAP_FILE, as_attachment=True, download_name="capture.pcap",
+                     mimetype="application/vnd.tcpdump.pcap")
 
 
 if __name__ == "__main__":
