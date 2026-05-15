@@ -46,6 +46,14 @@ def is_alive():
     return _proc is not None and _proc.poll() is None
 
 
+def get_own_ip():
+    try:
+        out = subprocess.check_output(["hostname", "-I"], text=True, timeout=3)
+        return out.strip().split()[0]
+    except Exception:
+        return ""
+
+
 def parse_line(line):
     """Parse | separated tshark -T fields output."""
     parts = line.split("|", 6)
@@ -318,7 +326,16 @@ function connectSSE() {
   };
 }
 
+function loadDefaultFilter() {
+  fetch('/myip').then(function(r) { return r.json(); }).then(function(d) {
+    if (d.ip) {
+      var f = document.getElementById('bpf');
+      if (!f.value) f.value = 'not host ' + d.ip;
+    }
+  }).catch(function() {});
+}
 loadIfaces();
+loadDefaultFilter();
 updateStatus();
 setInterval(updateStatus, 2000);
 </script>
@@ -334,6 +351,11 @@ def index():
 @app.route("/interfaces")
 def interfaces():
     return jsonify(get_interfaces())
+
+
+@app.route("/myip")
+def myip():
+    return jsonify({"ip": get_own_ip()})
 
 
 @app.route("/status")
@@ -385,6 +407,15 @@ def start():
     data = request.get_json(force=True) or {}
     iface = data.get("iface", "eth0")
     bpf   = data.get("filter", "").strip()
+
+    # Escludi automaticamente il traffico del Raspberry stesso
+    own_ip = get_own_ip()
+    exclude = "not host {}".format(own_ip) if own_ip else ""
+    if exclude:
+        effective_bpf = "({}) and {}".format(bpf, exclude) if bpf else exclude
+    else:
+        effective_bpf = bpf
+
     with _lock:
         if is_alive():
             return jsonify({"ok": False, "message": "Cattura gia in corso"})
@@ -409,8 +440,8 @@ def start():
         "-E", "header=n",
         "-E", "quote=n",
     ]
-    if bpf:
-        cmd += ["-f", bpf]
+    if effective_bpf:
+        cmd += ["-f", effective_bpf]
 
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
@@ -420,11 +451,11 @@ def start():
             _proc = proc
             _start_time = time.time()
             _iface = iface
-            _bpf = bpf
+            _bpf = effective_bpf
         threading.Thread(target=reader_thread, args=(proc,), daemon=True).start()
         msg = "Cattura avviata su " + iface
-        if bpf:
-            msg += " | filtro: " + bpf
+        if effective_bpf:
+            msg += " | filtro: " + effective_bpf
         return jsonify({"ok": True, "message": msg})
     except FileNotFoundError:
         return jsonify({"ok": False, "message": "tshark non trovato"})
