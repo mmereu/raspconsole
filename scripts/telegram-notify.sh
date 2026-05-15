@@ -26,7 +26,8 @@ case "$1" in
 📅 ${DATE}
 🌐 IP: <code>${IP}</code>
 🔗 Console: http://${IP}:8080
-📊 Dashboard: http://${IP}:8888"
+📊 Dashboard: http://${IP}:8888
+🔍 Sniffer: http://${IP}:9090"
                 exit 0
             fi
             sleep 2

@@ -1,0 +1,15 @@
+[Unit]
+Description=RasP-Sniffer Web Packet Capture Interface
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 /opt/rasp-sniffer/app.py
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
