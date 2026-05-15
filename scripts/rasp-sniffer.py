@@ -156,6 +156,23 @@ tr.OTHER  {background:#1e1e2e}
 tbody tr:hover{filter:brightness(1.6);cursor:default}
 tbody tr.sel{outline:1px solid #89b4fa;filter:brightness(1.8)}
 #autoscroll{accent-color:#89b4fa}
+/* Pannello analisi */
+#analyze-panel{display:none;position:fixed;top:0;right:0;width:440px;height:100vh;background:#181825;border-left:2px solid #313244;z-index:100;overflow-y:auto;padding:16px;box-shadow:-4px 0 20px #000a}
+#analyze-panel h2{font-size:13px;color:#cba6f7;font-family:sans-serif;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center}
+#analyze-panel h3{font-size:11px;color:#6c7086;text-transform:uppercase;letter-spacing:.8px;margin:14px 0 6px;font-family:sans-serif}
+.finding{background:#1e1e2e;border-radius:6px;padding:10px 12px;margin-bottom:8px;border-left:3px solid #45475a}
+.finding.red{border-color:#f38ba8}
+.finding.orange{border-color:#fab387}
+.finding.info{border-color:#89b4fa}
+.finding.green{border-color:#a6e3a1}
+.finding-title{font-size:12px;font-weight:700;margin-bottom:4px;color:#cdd6f4}
+.finding-action{font-size:11px;color:#a6adc8;line-height:1.5}
+.proto-bar{display:flex;align-items:center;gap:8px;margin-bottom:5px;font-size:11px}
+.proto-bar-fill{height:10px;border-radius:3px;background:#cba6f7;min-width:2px;transition:width .3s}
+.host-row{display:flex;justify-content:space-between;font-size:11px;padding:3px 0;border-bottom:1px solid #1e1e2e;color:#cdd6f4}
+.host-row span{color:#6c7086}
+#close-analyze{background:none;border:none;color:#6c7086;font-size:18px;cursor:pointer;padding:0}
+#close-analyze:hover{color:#cdd6f4}
 </style>
 </head>
 <body>
@@ -169,6 +186,7 @@ tbody tr.sel{outline:1px solid #89b4fa;filter:brightness(1.8)}
   <span class="sep">|</span>
   <button id="btn-clear" onclick="clearTable()">&#10006; Pulisci</button>
   <button id="btn-dl" onclick="location.href='/download'" disabled>&#11015; Scarica .pcap</button>
+  <button id="btn-analyze" onclick="runAnalyze()" style="background:#cba6f7;color:#1e1e2e" disabled>&#128270; Analizza</button>
   <div id="stats">
     <span class="dot" id="dot"></span>
     <span id="stat-pkt">0 pacchetti</span>
@@ -200,6 +218,11 @@ tbody tr.sel{outline:1px solid #89b4fa;filter:brightness(1.8)}
     </thead>
     <tbody id="tbody"></tbody>
   </table>
+</div>
+
+<div id="analyze-panel">
+  <h2>&#128270; Analisi traffico <button id="close-analyze" onclick="closeAnalyze()">&#10005;</button></h2>
+  <div id="analyze-content">Premi Analizza per elaborare i pacchetti catturati.</div>
 </div>
 
 <script>
@@ -279,9 +302,10 @@ function updateStatus() {
     dot.className = 'dot' + (on ? ' on' : '');
     document.getElementById('stat-size').textContent = fmtBytes(s.file_size);
     document.getElementById('stat-dur').textContent  = on ? fmtDur(s.duration) : '—';
-    document.getElementById('btn-start').disabled = on;
-    document.getElementById('btn-stop').disabled  = !on;
-    document.getElementById('btn-dl').disabled    = !s.file_exists;
+    document.getElementById('btn-start').disabled   = on;
+    document.getElementById('btn-stop').disabled    = !on;
+    document.getElementById('btn-dl').disabled      = !s.file_exists;
+    document.getElementById('btn-analyze').disabled = (pktCount === 0);
   });
 }
 
@@ -326,6 +350,57 @@ function connectSSE() {
   };
 }
 
+function runAnalyze() {
+  document.getElementById('analyze-panel').style.display = 'block';
+  document.getElementById('analyze-content').innerHTML = '<p style="color:#6c7086;font-size:12px">Elaborazione in corso...</p>';
+  fetch('/analyze').then(function(r){return r.json();}).then(function(d){
+    if (d.total === 0) {
+      document.getElementById('analyze-content').innerHTML = '<p style="color:#6c7086;font-size:12px">Nessun pacchetto da analizzare. Avvia prima una cattura.</p>';
+      return;
+    }
+    var html = '<p style="font-size:11px;color:#6c7086;margin-bottom:12px">Analizzati <b style="color:#cdd6f4">' + d.total + '</b> pacchetti</p>';
+
+    // Findings
+    html += '<h3>Rilevazioni e consigli</h3>';
+    d.findings.forEach(function(f) {
+      html += '<div class="finding ' + f.level + '">' +
+        '<div class="finding-title">' + f.icon + ' ' + escHtml(f.title) + '</div>' +
+        '<div class="finding-action">' + escHtml(f.action) + '</div></div>';
+    });
+
+    // Top protocolli
+    var maxP = d.top_protos.length ? d.top_protos[0][1] : 1;
+    html += '<h3>Protocolli pi&#249; frequenti</h3>';
+    d.top_protos.forEach(function(p) {
+      var pct = Math.round(p[1] / maxP * 100);
+      html += '<div class="proto-bar">' +
+        '<div style="width:80px;overflow:hidden;text-overflow:ellipsis">' + escHtml(p[0]) + '</div>' +
+        '<div class="proto-bar-fill" style="width:' + pct + 'px"></div>' +
+        '<span style="color:#6c7086">' + p[1] + '</span></div>';
+    });
+
+    // Top sorgenti
+    html += '<h3>Host pi&#249; attivi (origine)</h3>';
+    d.top_src.forEach(function(h) {
+      html += '<div class="host-row"><span style="font-family:monospace">' + escHtml(h[0]) + '</span><span>' + h[1] + ' pkt</span></div>';
+    });
+
+    // Top destinazioni
+    html += '<h3>Host pi&#249; contattati (destinazione)</h3>';
+    d.top_dst.forEach(function(h) {
+      html += '<div class="host-row"><span style="font-family:monospace">' + escHtml(h[0]) + '</span><span>' + h[1] + ' pkt</span></div>';
+    });
+
+    document.getElementById('analyze-content').innerHTML = html;
+  }).catch(function(e) {
+    document.getElementById('analyze-content').innerHTML = '<p style="color:#f38ba8;font-size:12px">Errore: ' + e + '</p>';
+  });
+}
+
+function closeAnalyze() {
+  document.getElementById('analyze-panel').style.display = 'none';
+}
+
 function loadDefaultFilter() {
   fetch('/myip').then(function(r) { return r.json(); }).then(function(d) {
     if (d.ip) {
@@ -356,6 +431,103 @@ def interfaces():
 @app.route("/myip")
 def myip():
     return jsonify({"ip": get_own_ip()})
+
+
+@app.route("/analyze")
+def analyze():
+    with _lock:
+        pkts = list(_packets)
+
+    if not pkts:
+        return jsonify({"total": 0, "findings": [], "top_protos": [], "top_src": [], "top_dst": []})
+
+    proto_counts = {}
+    src_counts = {}
+    dst_counts = {}
+    info_all = []
+
+    for p in pkts:
+        proto = p.get("proto", "") or "OTHER"
+        src   = p.get("src", "")
+        dst   = p.get("dst", "")
+        info  = p.get("info", "").lower()
+
+        proto_counts[proto] = proto_counts.get(proto, 0) + 1
+        if src:
+            src_counts[src] = src_counts.get(src, 0) + 1
+        if dst:
+            dst_counts[dst] = dst_counts.get(dst, 0) + 1
+        info_all.append(info)
+
+    top_protos = sorted(proto_counts.items(), key=lambda x: x[1], reverse=True)[:8]
+    top_src    = sorted(src_counts.items(),   key=lambda x: x[1], reverse=True)[:5]
+    top_dst    = sorted(dst_counts.items(),   key=lambda x: x[1], reverse=True)[:5]
+
+    findings = []
+
+    # --- Sicurezza ---
+    if proto_counts.get("HTTP", 0) > 0:
+        findings.append({"level": "red", "icon": "🔴",
+            "title": "HTTP non cifrato ({} pacchetti)".format(proto_counts["HTTP"]),
+            "action": "Migra i servizi web a HTTPS (porta 443). I dati HTTP sono leggibili da chiunque sulla rete."})
+
+    telnet_pkts = proto_counts.get("TELNET", 0) + sum(1 for i in info_all if "telnet" in i)
+    if telnet_pkts > 0:
+        findings.append({"level": "red", "icon": "🔴",
+            "title": "Telnet rilevato — credenziali in chiaro",
+            "action": "Sostituisci Telnet con SSH. Telnet trasmette username e password leggibili."})
+
+    ftp_pkts = proto_counts.get("FTP", 0) + proto_counts.get("FTP-DATA", 0)
+    if ftp_pkts > 0:
+        findings.append({"level": "orange", "icon": "🟠",
+            "title": "FTP rilevato ({} pacchetti)".format(ftp_pkts),
+            "action": "Usa SFTP o FTPS al posto di FTP. Le credenziali FTP viaggiano in chiaro."})
+
+    snmp_pkts = proto_counts.get("SNMP", 0)
+    if snmp_pkts > 0:
+        findings.append({"level": "orange", "icon": "🟠",
+            "title": "SNMP rilevato ({} pacchetti)".format(snmp_pkts),
+            "action": "Verifica che sia usato SNMPv3 con autenticazione. SNMPv1/v2c usano community string in chiaro."})
+
+    # Possibile port scan: un singolo src verso molti dst diversi
+    for src, count in src_counts.items():
+        dst_from_src = sum(1 for p in pkts if p.get("src") == src and p.get("dst"))
+        unique_dst = len(set(p.get("dst") for p in pkts if p.get("src") == src and p.get("dst")))
+        if unique_dst > 20 and count > 50:
+            findings.append({"level": "orange", "icon": "🟠",
+                "title": "Possibile port/network scan da {}".format(src),
+                "action": "L'host {} ha contattato {} destinazioni distinte. Verifica se è attività legittima.".format(src, unique_dst)})
+            break
+
+    # --- Suggerimenti di rete ---
+    dns_pkts = proto_counts.get("DNS", 0) + proto_counts.get("MDNS", 0)
+    if dns_pkts > 0:
+        findings.append({"level": "info", "icon": "🔵",
+            "title": "DNS: {} query rilevate".format(dns_pkts),
+            "action": "Il traffico DNS è normale. Se vuoi filtrarlo: aggiungi 'and not port 53' al filtro BPF."})
+
+    arp_pkts = proto_counts.get("ARP", 0)
+    if arp_pkts > 30:
+        findings.append({"level": "orange", "icon": "🟠",
+            "title": "ARP elevato: {} pacchetti".format(arp_pkts),
+            "action": "Molti pacchetti ARP possono indicare un ARP scan o conflitti IP. Verifica la rete."})
+    elif arp_pkts > 0:
+        findings.append({"level": "info", "icon": "🔵",
+            "title": "ARP: {} pacchetti (normale)".format(arp_pkts),
+            "action": "Traffico ARP nella norma. Per nasconderlo al prossimo avvio: aggiungi 'and not arp' al filtro BPF."})
+
+    if not findings:
+        findings.append({"level": "green", "icon": "🟢",
+            "title": "Nessuna anomalia rilevata",
+            "action": "Il traffico analizzato non mostra protocolli insicuri o comportamenti anomali."})
+
+    return jsonify({
+        "total":      len(pkts),
+        "top_protos": top_protos,
+        "top_src":    top_src,
+        "top_dst":    top_dst,
+        "findings":   findings,
+    })
 
 
 @app.route("/status")
